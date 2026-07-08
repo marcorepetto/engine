@@ -34,6 +34,9 @@ function move_ball.process(robotId, team, target)
             x = ball_pos.x - (dx / dist) * offset_dist,
             y = ball_pos.y - (dy / dist) * offset_dist
         }
+
+        -- Dibujar el punto de aproximación para depuración
+        draw_point(approach_point.x, approach_point.y, true, {r=1.0, g=0.0, b=0.0})
         
         -- 3. Calcular qué tan cerca está el robot de ese punto de aproximación ideal
         local dist_to_approach = math.sqrt((robot_pos.x - approach_point.x)^2 + (robot_pos.y - approach_point.y)^2)
@@ -44,9 +47,10 @@ function move_ball.process(robotId, team, target)
             move_to(robotId, team, approach_point)
             face_to(robotId, team, target)
         else
-            -- Si ya estamos posicionados atrás, avanzamos directo hacia la pelota para empujarla
-            move_to(robotId, team, ball_pos)
+            -- Si ya estamos posicionados atrás, avanzamos directo (sin esquivar la pelota) hacia ella
+            move_direct(robotId, team, target)
             face_to(robotId, team, target)
+            dribbler(robotId, team, 5) -- Activar dribbler para asegurar la posesión
         end
         return false
     end
