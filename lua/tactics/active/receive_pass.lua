@@ -16,6 +16,9 @@ function ReceivePass:process(robotId, team)
         return self.state == ReceivePass.State.done
     end
 
+    local mu = 0.05 -- Friction coefficient
+    local g  = 9.81 -- Gravity
+
     local ball = get_ball_state()
     local robot = get_robot_state(robotId, team)
 
@@ -36,8 +39,8 @@ function ReceivePass:process(robotId, team)
     -- If the ball is moving fast enough, calculate interception
     if ball_speed > 0.1 then
         -- 1. Get the direction the ball is traveling (normalized vector)
-        local dir_x = bvx / ball_speed
-        local dir_y = bvy / ball_speed
+        dir_x = bvx / ball_speed
+        dir_y = bvy / ball_speed
         
         -- 2. Get the vector from the ball to our robot
         local dx = robot.x - ball.x
@@ -45,21 +48,37 @@ function ReceivePass:process(robotId, team)
         
         -- 3. Calculate the dot product to project our robot onto the ball's path
         local dot = (dx * dir_x) + (dy * dir_y)
-        
+
+        -- local time_to_intercept = dot / ball_speed
+        local max_dist = ball_speed*ball_speed/(2*1.42857*mu*g)
+
         -- 4. If dot > 0, the ball is traveling towards our general direction
         if dot > 0 then
+            if dot > max_dist then
+                dot = max_dist
+            end
+
             -- Set target to the closest point on the ball's trajectory line
             target_x = ball.x + (dir_x * dot)
             target_y = ball.y + (dir_y * dot)
         end
+
+        -- 5. Face the robot towards the ball's direction of travel
+        local target_orientation = {
+            x = robot.x - dir_x*10,
+            y = robot.y - dir_y*10
+        }
+        face_to(robotId, team, target_orientation)
+    else
+        -- If the ball is slow or stopped, just face it and wait
+        face_to(robotId, team, {x = ball.x, y = ball.y})
     end
+    -- Move to interception point and always keep eyes on the ball
+    move_to(robotId, team, {x = target_x, y = target_y})
 
     -- Draw a green dot at our interception/waiting point so you can debug it
     draw_point(target_x, target_y, true, {r=0.0, g=1.0, b=0.0})
     
-    -- Move to interception point and always keep eyes on the ball
-    move_to(robotId, team, {x = target_x, y = target_y})
-    face_to(robotId, team, {x = ball.x, y = ball.y})
 
     -- Check if we are close enough to consider the receive successful (e.g., we trapped it)
     if dist_to_ball < 0.15 then
