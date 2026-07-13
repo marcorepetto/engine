@@ -2,7 +2,110 @@
 // Port of receivers/tracker.cpp + kalman/ekf.cpp
 
 use nalgebra::{SMatrix, SVector};
+use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+#[derive(Serialize, Clone, Debug)]
+pub struct EkfTelemetry {
+    pub timestamp_ms: u64,
+    pub team: i32,
+    pub id: i32,
+    pub x: f64,
+    pub y: f64,
+    pub theta: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub omega: f64,
+    pub innovation_x: f64,
+    pub innovation_y: f64,
+    pub innovation_theta: f64,
+    pub p_trace: f64,
+    pub q_trace: f64,
+    pub r_trace: f64,
+}
+
+pub struct TelemetryManager {
+    pub enabled: bool,
+    pub filepath: String,
+    pub records: Vec<EkfTelemetry>,
+}
+
+impl TelemetryManager {
+    pub const fn new() -> Self {
+        Self {
+            enabled: false,
+            filepath: String::new(),
+            records: Vec::new(),
+        }
+    }
+}
+
+pub static TELEMETRY: LazyLock<Mutex<TelemetryManager>> = LazyLock::new(|| {
+    Mutex::new(TelemetryManager::new())
+});
+
+pub fn start_telemetry(filepath: String) {
+    if let Ok(mut tm) = TELEMETRY.lock() {
+        tm.enabled = true;
+        tm.filepath = filepath;
+        tm.records.clear();
+        println!("[EKF Telemetry] Recording started. Target file: {}", tm.filepath);
+    }
+}
+
+pub fn stop_telemetry() {
+    let mut filepath = String::new();
+    let mut records = Vec::new();
+    let mut was_enabled = false;
+
+    if let Ok(mut tm) = TELEMETRY.lock() {
+        if tm.enabled {
+            filepath = tm.filepath.clone();
+            
+            // Normalize path extension to .csv
+            if filepath.ends_with(".jsonl") {
+                filepath = filepath.replace(".jsonl", ".csv");
+            } else if filepath.ends_with(".json") {
+                filepath = filepath.replace(".json", ".csv");
+            } else if !filepath.ends_with(".csv") {
+                filepath.push_str(".csv");
+            }
+
+            records = std::mem::take(&mut tm.records);
+            tm.enabled = false;
+            was_enabled = true;
+        }
+    }
+
+    if was_enabled && !filepath.is_empty() && !records.is_empty() {
+        println!("[EKF Telemetry] Recording stopped. Writing {} records...", records.len());
+        std::thread::spawn(move || {
+            let path = std::path::Path::new(&filepath);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            match csv::Writer::from_path(path) {
+                Ok(mut writer) => {
+                    let mut count = 0;
+                    for record in records {
+                        if writer.serialize(record).is_ok() {
+                            count += 1;
+                        }
+                    }
+                    let _ = writer.flush();
+                    println!("[EKF Telemetry] Successfully wrote {} CSV records to {:?}", count, path);
+                }
+                Err(e) => {
+                    eprintln!("[EKF Telemetry] Failed to create CSV writer for {:?}: {:?}", path, e);
+                }
+            }
+        });
+    } else {
+        println!("[EKF Telemetry] Recording stop requested, but no active telemetry session was running.");
+    }
+}
 
 /// 7-state Extended Kalman Filter: [x, y, sin(θ), cos(θ), vx, vy, ω]
 pub struct ExtendedKalmanFilter {
@@ -33,31 +136,34 @@ impl ExtendedKalmanFilter {
         self.p = f_jac * self.p * f_jac.transpose() + self.q;
     }
 
-    pub fn update(&mut self, z: &SVector<f64, 3>) {
+    pub fn update(&mut self, z: &SVector<f64, 3>) -> SVector<f64, 3> {
         let h_jac = self.jacobian_h();
         let mut y = z - self.h();
         y[2] = normalize_angle(y[2]);
+        let innovation = y;
 
         let s = h_jac * self.p * h_jac.transpose() + self.r;
         let s_inv = s.try_inverse().unwrap_or_else(|| SMatrix::<f64, 3, 3>::identity());
         let k = self.p * h_jac.transpose() * s_inv;
 
-        self.x = self.x + k * y;
+        self.x = self.x + k * innovation;
         self.p = (SMatrix::<f64, 7, 7>::identity() - k * h_jac) * self.p;
+
+        innovation
     }
 
-    /// Combined predict + update, returns (x, y, θ, vx, vy, ω)
+    /// Combined predict + update, returns (x, y, θ, vx, vy, ω, innovation, p_trace, q_trace, r_trace)
     pub fn filter_pose(
         &mut self,
         x_meas: f64,
         y_meas: f64,
         theta_meas: f64,
         dt: f64,
-    ) -> (f64, f64, f64, f64, f64, f64) {
+    ) -> (f64, f64, f64, f64, f64, f64, SVector<f64, 3>, f64, f64, f64) {
         self.predict(dt);
 
         let z = SVector::<f64, 3>::new(x_meas, y_meas, theta_meas);
-        self.update(&z);
+        let innovation = self.update(&z);
 
         let x_f = self.x[0];
         let y_f = self.x[1];
@@ -66,7 +172,11 @@ impl ExtendedKalmanFilter {
         let vy = self.x[5];
         let omega = self.x[6];
 
-        (x_f, y_f, theta_f, vx, vy, omega)
+        let p_trace = self.p.trace();
+        let q_trace = self.q.trace();
+        let r_trace = self.r.trace();
+
+        (x_f, y_f, theta_f, vx, vy, omega, innovation, p_trace, q_trace, r_trace)
     }
 
     // State transition: [x, y, sin(θ), cos(θ), vx, vy, ω]
@@ -126,6 +236,7 @@ impl ExtendedKalmanFilter {
 
         h
     }
+
     pub fn set_noise_parameters(&mut self, p_noise_p: f64, p_noise_v: f64, m_noise: f64) {
         // Position noise
         self.q[(0, 0)] = p_noise_p;
@@ -210,7 +321,34 @@ impl Tracker {
 
         filter.set_noise_parameters(process_noise_p, process_noise_v, measurement_noise);
 
-        let (_, _, _, vx, vy, omega) = filter.filter_pose(x, y, theta, dt);
+        let (x_f, y_f, theta_f, vx, vy, omega, innovation, p_trace, q_trace, r_trace) = filter.filter_pose(x, y, theta, dt);
+
+        if let Ok(mut tm) = TELEMETRY.lock() {
+            if tm.enabled {
+                let timestamp_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                tm.records.push(EkfTelemetry {
+                    timestamp_ms,
+                    team,
+                    id,
+                    x: x_f,
+                    y: y_f,
+                    theta: theta_f,
+                    vx,
+                    vy,
+                    omega,
+                    innovation_x: innovation[0],
+                    innovation_y: innovation[1],
+                    innovation_theta: innovation[2],
+                    p_trace,
+                    q_trace,
+                    r_trace,
+                });
+            }
+        }
 
         (x, y, theta, vx, vy, omega)
     }
@@ -277,9 +415,9 @@ mod tests {
         );
 
         ekf.predict(0.016);
-        ekf.update(&SVector::<f64, 3>::new(0.0, 0.0, 0.0));
+        let _ = ekf.update(&SVector::<f64, 3>::new(0.0, 0.0, 0.0));
 
-        let (_x, _y, _theta, _vx, _vy, _omega) = ekf.filter_pose(0.1, -0.2, 0.3, 0.016);
+        let (_x, _y, _theta, _vx, _vy, _omega, _, _, _, _) = ekf.filter_pose(0.1, -0.2, 0.3, 0.016);
     }
 
     #[test]
@@ -290,3 +428,4 @@ mod tests {
         assert!(vx.is_finite() && vy.is_finite() && omega.is_finite());
     }
 }
+

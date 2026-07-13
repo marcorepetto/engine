@@ -79,6 +79,11 @@ function get_yellow_team_state() end
 ---@return string
 function get_ref_message() end
 
+---@param filename string
+function start_ekf_telemetry(filename) end
+
+function stop_ekf_telemetry() end
+
 ---@param x number
 ---@param y number
 ---@param draw_x_or_color? boolean|number[]|{r:number,g:number,b:number}

@@ -240,4 +240,26 @@ pub(super) fn register_control_functions(
             .unwrap();
         globals.set("dribbler", f).unwrap();
     }
+
+    // ── start_ekf_telemetry(filename) ──
+    {
+        let f = lua
+            .create_function(move |_, filename: String| {
+                crate::receiver::tracker::start_telemetry(filename);
+                Ok(())
+            })
+            .unwrap();
+        globals.set("start_ekf_telemetry", f).unwrap();
+    }
+
+    // ── stop_ekf_telemetry() ──
+    {
+        let f = lua
+            .create_function(move |_, ()| {
+                crate::receiver::tracker::stop_telemetry();
+                Ok(())
+            })
+            .unwrap();
+        globals.set("stop_ekf_telemetry", f).unwrap();
+    }
 }
